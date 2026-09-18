@@ -1,0 +1,10 @@
+# Deep Learning & Computer Vision Engines
+ultralytics>=8.0.0
+sahi>=0.11.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+
+# GUI & Image Processing
+customtkinter>=5.2.0
+Pillow>=10.0.0
