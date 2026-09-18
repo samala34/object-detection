@@ -280,17 +280,27 @@ class VideoMonitorTab(ctk.CTkFrame):
             if fps > 0 and total_vid_frames > 0:
                 video_duration_seconds = total_vid_frames / fps
 
-            slice_size = 512
-            overlap_ratio = 0.25
+            # OPTIMIZATION #1: Video Stride Sampling (Runs AI once per second)
+            stride = max(1, int(fps)) if fps > 0 else 25
+
+            # OPTIMIZATION #2: Efficient Slicing Grid (640x640 with 10% overlap reduces slices by ~60%)
+            slice_size = 640
+            overlap_ratio = 0.10
 
             while cap.isOpened() and self.is_processing:
+                current_frame_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
                 ret, frame = cap.read()
                 if not ret:
                     break
 
+                # Skip frames that do not align with the stride interval
+                if current_frame_pos % stride != 0:
+                    continue
+
                 processed_frames += 1
 
-                # Exact timestamp with millisecond precision
+                # Calculate minute, second, and millisecond timestamps
                 msec = cap.get(cv2.CAP_PROP_POS_MSEC)
                 total_seconds = int(msec // 1000)
                 mins = total_seconds // 60
@@ -302,7 +312,7 @@ class VideoMonitorTab(ctk.CTkFrame):
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_h, frame_w, _ = rgb_frame.shape
 
-                # SAHI Sliced Prediction
+                # SAHI Sliced Prediction with Optimized Grid Geometry
                 result = get_sliced_prediction(
                     rgb_frame,
                     detection_model,
@@ -340,8 +350,7 @@ class VideoMonitorTab(ctk.CTkFrame):
 
                     frame_detections.append({"class": class_name.capitalize(), "score": score})
 
-                # --- 1:1 SYNC FRAME SAVING ---
-                # Save frame image on EVERY logged detection event (no deduplication)
+                # Save snapshot image on EVERY evaluated stride frame where objects exist
                 saved_filename = "N/A"
                 if frame_detections:
                     saved_frames_count += 1
@@ -354,7 +363,7 @@ class VideoMonitorTab(ctk.CTkFrame):
                 # Log entry referencing the exact saved filename for analytical traceability
                 self.append_clean_log(timestamp_str, saved_filename, frame_detections)
 
-                # Render Frame to GUI Preview
+                # OPTIMIZATION #3: Render GUI Preview only for sampled stride frames
                 img = Image.fromarray(annotated_frame)
                 widget_w = max(self.video_box.winfo_width(), 100)
                 widget_h = max(self.video_box.winfo_height(), 100)
@@ -463,37 +472,52 @@ class OfficeFloorMonitorApp(ctk.CTk):
     def get_selected_model_filename(self):
         model_arch = self.combo_model.get().lower()
         variant = self.combo_variant.get().lower()
-        return f"{model_arch}{variant}.pt"
+        return f"{model_arch}{variant}"
 
-    def resolve_model_file_path(self, filename):
+    def resolve_model_file_path(self, base_name):
+        # OPTIMIZATION #4: Prefer OpenVINO directory if present for hardware acceleration
+        openvino_dir = f"{base_name}_openvino_model"
+        pt_file = f"{base_name}.pt"
+
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-            bundled_path = os.path.join(sys._MEIPASS, filename)
-            if os.path.exists(bundled_path):
-                return bundled_path
-        return filename
+            bundled_ov = os.path.join(sys._MEIPASS, openvino_dir)
+            bundled_pt = os.path.join(sys._MEIPASS, pt_file)
+            if os.path.exists(bundled_ov):
+                return bundled_ov, "openvino"
+            if os.path.exists(bundled_pt):
+                return bundled_pt, "ultralytics"
+
+        if os.path.exists(openvino_dir):
+            return openvino_dir, "openvino"
+        elif os.path.exists(pt_file):
+            return pt_file, "ultralytics"
+
+        return pt_file, "ultralytics"
 
     def check_selected_model_availability(self):
-        filename = self.get_selected_model_filename()
-        resolved_path = self.resolve_model_file_path(filename)
+        base_name = self.get_selected_model_filename()
+        resolved_path, model_type = self.resolve_model_file_path(base_name)
 
         if os.path.exists(resolved_path):
-            self.lbl_model_status.configure(text=f"✓ {filename} Ready", text_color="#4CAF50")
+            tag = "OpenVINO" if model_type == "openvino" else "PyTorch"
+            self.lbl_model_status.configure(text=f"✓ {os.path.basename(resolved_path)} ({tag}) Ready", text_color="#4CAF50")
             self.btn_download_model.pack_forget()
             return True
         else:
-            self.lbl_model_status.configure(text=f"⚠ {filename} Missing", text_color="#EF4444")
+            self.lbl_model_status.configure(text=f"⚠ {base_name}.pt Missing", text_color="#EF4444")
             self.btn_download_model.pack(side="left", padx=5)
             return False
 
     def on_model_selection_change(self, _choice=None):
-        filename = self.get_selected_model_filename()
-        if filename != self.loaded_model_filename:
+        base_name = self.get_selected_model_filename()
+        if base_name != self.loaded_model_filename:
             self.shared_detection_model = None
             self.loaded_model_filename = None
         self.check_selected_model_availability()
 
     def download_selected_model(self):
-        filename = self.get_selected_model_filename()
+        base_name = self.get_selected_model_filename()
+        filename = f"{base_name}.pt"
         
         self.btn_download_model.configure(state="disabled", text="Downloading...")
         self.lbl_model_status.configure(text=f"⏳ Fetching {filename}...", text_color="#EAB308")
@@ -517,24 +541,24 @@ class OfficeFloorMonitorApp(ctk.CTk):
             self.check_selected_model_availability()
 
     def get_shared_model(self):
-        filename = self.get_selected_model_filename()
-        resolved_path = self.resolve_model_file_path(filename)
+        base_name = self.get_selected_model_filename()
+        resolved_path, model_type = self.resolve_model_file_path(base_name)
 
         if not os.path.exists(resolved_path):
-            messagebox.showwarning("Model Missing", f"The weight file '{filename}' is not available locally.\nPlease click 'Download Model' at the top bar first.")
+            messagebox.showwarning("Model Missing", f"Model file/directory '{base_name}' is missing.\nPlease click 'Download Model' at the top bar first.")
             return None
 
-        if not self.shared_detection_model or self.loaded_model_filename != filename:
+        if not self.shared_detection_model or self.loaded_model_filename != base_name:
             try:
                 self.shared_detection_model = AutoDetectionModel.from_pretrained(
-                    model_type="ultralytics",
+                    model_type=model_type,
                     model_path=resolved_path,
                     confidence_threshold=0.25,
                     device="cpu"
                 )
-                self.loaded_model_filename = filename
+                self.loaded_model_filename = base_name
             except Exception as e:
-                messagebox.showerror("Model Error", f"Failed to load SAHI model '{filename}':\n{str(e)}")
+                messagebox.showerror("Model Error", f"Failed to load SAHI model from '{resolved_path}':\n{str(e)}")
                 return None
 
         return self.shared_detection_model
