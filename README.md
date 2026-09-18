@@ -94,3 +94,4 @@ python -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
 * **`output_detections/<video_name>/`**: Contains `.png` snapshots of annotated video frames saved whenever object counts change.
 * **`processing_summary_log.csv`**: A structured performance report appended automatically when a video stream finishes processing (contains video duration, total processing time, FPS, and saved frame counts).
 * **Exported Log CSVs**: Custom session log files generated via the **Export CSV** button inside the active stream tab.
+

@@ -48,7 +48,6 @@ class VideoMonitorTab(ctk.CTkFrame):
         self.video_name = "Unassigned"
         self.is_processing = False
         self.logged_data = []
-        self.last_saved_summary = {}
         self.output_dir = "output_detections"
 
         # Build UI layout for this specific tab
@@ -168,7 +167,6 @@ class VideoMonitorTab(ctk.CTkFrame):
 
     def clear_log(self):
         self.logged_data.clear()
-        self.last_saved_summary = {}
         self.txt_log.configure(state="normal")
         self.txt_log.delete("1.0", tk.END)
         self.txt_log.configure(state="disabled")
@@ -183,7 +181,7 @@ class VideoMonitorTab(ctk.CTkFrame):
             try:
                 with open(save_path, mode="w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Timestamp", "Class", "Confidence", "Confidence Level"])
+                    writer.writerow(["Timestamp", "Frame Filename", "Class", "Confidence", "Confidence Level"])
                     writer.writerows(self.logged_data)
                 messagebox.showinfo("Success", f"Session log saved to:\n{save_path}")
             except Exception as e:
@@ -203,7 +201,6 @@ class VideoMonitorTab(ctk.CTkFrame):
         self.btn_start.configure(state="disabled")
         self.btn_select.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.last_saved_summary = {}
         
         self.clear_log()
         threading.Thread(target=self.process_video, daemon=True).start()
@@ -222,11 +219,10 @@ class VideoMonitorTab(ctk.CTkFrame):
         
         self.remove_tab_callback(self.tab_title)
 
-    def log_and_print_summary(self, video_duration_seconds, total_processing_time, processed_frames, violations_found):
+    def log_and_print_summary(self, video_duration_seconds, total_processing_time, processed_frames, saved_frames_count):
         """Prints report to console terminal and appends entry to summary CSV log."""
         processing_speed_fps = (processed_frames / total_processing_time) if total_processing_time > 0 else 0.0
 
-        # 1. Terminal Print Output
         print("\n" + "="*40)
         print("          PROCESSING REPORT          ")
         print("="*40)
@@ -234,21 +230,19 @@ class VideoMonitorTab(ctk.CTkFrame):
         print(f"Total Time Taken      : {total_processing_time / 60:.2f} minutes ({total_processing_time:.1f} seconds)")
         print(f"Total Frames Analyzed : {processed_frames} frames (SAHI slices)")
         print(f"Processing Speed      : {processing_speed_fps:.2f} frames per second")
-        print(f"Total Violations Saved: {violations_found} images")
+        print(f"Total Frames Saved    : {saved_frames_count} images (Synced 1:1 with log)")
         print("="*40 + "\n")
 
-        # 2. Append Metrics Record into processing_summary_log.csv
         csv_log_file = "processing_summary_log.csv"
         file_exists = os.path.exists(csv_log_file)
 
         try:
             with open(csv_log_file, mode="a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                # Header created if log file doesn't exist yet
                 if not file_exists:
                     writer.writerow([
                         "Video Name", "Video Duration (min)", "Time Taken (min)", 
-                        "Time Taken (sec)", "Frames Analyzed", "FPS Speed", "Violations Saved"
+                        "Time Taken (sec)", "Frames Analyzed", "FPS Speed", "Synced Frames Saved"
                     ])
 
                 writer.writerow([
@@ -258,7 +252,7 @@ class VideoMonitorTab(ctk.CTkFrame):
                     f"{total_processing_time:.1f}",
                     processed_frames,
                     f"{processing_speed_fps:.2f}",
-                    violations_found
+                    saved_frames_count
                 ])
         except Exception as err:
             print(f"[Warning] Unable to write summary log CSV: {err}")
@@ -269,10 +263,9 @@ class VideoMonitorTab(ctk.CTkFrame):
             self.stop_processing()
             return
 
-        # Timing & Metrics Initialization
         start_time = time.time()
         processed_frames = 0
-        violations_found = 0
+        saved_frames_count = 0
         video_duration_seconds = 0.0
 
         try:
@@ -282,7 +275,6 @@ class VideoMonitorTab(ctk.CTkFrame):
                 self.stop_processing()
                 return
 
-            # Read video metadata parameters
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_vid_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
             if fps > 0 and total_vid_frames > 0:
@@ -298,11 +290,14 @@ class VideoMonitorTab(ctk.CTkFrame):
 
                 processed_frames += 1
 
+                # Exact timestamp with millisecond precision
                 msec = cap.get(cv2.CAP_PROP_POS_MSEC)
                 total_seconds = int(msec // 1000)
                 mins = total_seconds // 60
                 secs = total_seconds % 60
-                timestamp_str = f"{mins:02d}:{secs:02d}"
+                millis = int(msec % 1000)
+
+                timestamp_str = f"{mins:02d}:{secs:02d}.{millis:03d}"
 
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_h, frame_w, _ = rgb_frame.shape
@@ -345,24 +340,21 @@ class VideoMonitorTab(ctk.CTkFrame):
 
                     frame_detections.append({"class": class_name.capitalize(), "score": score})
 
-                current_summary = {}
-                for item in frame_detections:
-                    current_summary[item["class"]] = current_summary.get(item["class"], 0) + 1
-
-                # Save snapshot to specific video folder on count change
-                if frame_detections and (current_summary != self.last_saved_summary):
-                    self.last_saved_summary = current_summary
-                    violations_found += 1
-
-                    filename = f"frame_{mins:02d}m_{secs:02d}s.png"
-                    save_path = os.path.join(self.output_dir, filename)
+                # --- 1:1 SYNC FRAME SAVING ---
+                # Save frame image on EVERY logged detection event (no deduplication)
+                saved_filename = "N/A"
+                if frame_detections:
+                    saved_frames_count += 1
+                    saved_filename = f"frame_{mins:02d}m_{secs:02d}s_{millis:03d}ms.png"
+                    save_path = os.path.join(self.output_dir, saved_filename)
                     
                     bgr_save = cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR)
                     cv2.imwrite(save_path, bgr_save)
 
-                self.append_clean_log(timestamp_str, frame_detections)
+                # Log entry referencing the exact saved filename for analytical traceability
+                self.append_clean_log(timestamp_str, saved_filename, frame_detections)
 
-                # Render Frame to GUI
+                # Render Frame to GUI Preview
                 img = Image.fromarray(annotated_frame)
                 widget_w = max(self.video_box.winfo_width(), 100)
                 widget_h = max(self.video_box.winfo_height(), 100)
@@ -374,17 +366,18 @@ class VideoMonitorTab(ctk.CTkFrame):
 
             cap.release()
 
-            # Generate and print performance report when processing finishes
+            # Output Performance Summary Report
             total_processing_time = time.time() - start_time
             if processed_frames > 0:
-                self.log_and_print_summary(video_duration_seconds, total_processing_time, processed_frames, violations_found)
+                self.log_and_print_summary(video_duration_seconds, total_processing_time, processed_frames, saved_frames_count)
 
         except Exception as err:
             messagebox.showerror("Execution Error", f"Error on stream '{self.video_name}':\n{str(err)}")
         finally:
             self.stop_processing()
 
-    def append_clean_log(self, timestamp, detections):
+    def append_clean_log(self, timestamp, filename, detections):
+        """Formats stream detections into a clear log layout mapped 1:1 to saved image filenames."""
         self.txt_log.configure(state="normal")
         if not detections:
             log_line = f"[{timestamp}] - No active targets detected.\n"
@@ -394,18 +387,18 @@ class VideoMonitorTab(ctk.CTkFrame):
                 cls, score = d["class"], d["score"]
                 grouped.setdefault(cls, []).append(score)
 
-            log_line = f"⏱ [{timestamp}] Total Objects: {len(detections)}\n"
+            log_line = f"⏱ [{timestamp}] Total Objects: {len(detections)} | Image: {filename}\n"
             for cls_name, scores in grouped.items():
                 score_strings = []
                 for score in scores:
                     pct = int(score * 100)
                     level = "HIGH" if score >= 0.70 else ("MED" if score >= 0.50 else "LOW")
                     score_strings.append(f"{pct}% ({level})")
-                    self.logged_data.append([timestamp, cls_name, f"{pct}%", level])
+                    self.logged_data.append([timestamp, filename, cls_name, f"{pct}%", level])
 
                 log_line += f"   • {cls_name} ({len(scores)}x) → Confidence: {', '.join(score_strings)}\n"
 
-        log_line += "-" * 50 + "\n"
+        log_line += "-" * 55 + "\n"
         self.txt_log.insert(tk.END, log_line)
         self.txt_log.see(tk.END)
         self.txt_log.configure(state="disabled")
